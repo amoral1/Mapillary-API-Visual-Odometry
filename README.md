@@ -1,4 +1,4 @@
-# Mapillary × MapAnything — Street-Level 3D Reconstruction Pipeline
+# Mapillary × MapAnything x Vggt-Long x Pi-Long — Street-Level 3D Reconstruction Pipeline
 
 A research pipeline for metric 3D reconstruction, trajectory evaluation, and Gaussian Splatting from Mapillary street-level imagery, built on Meta's [MapAnything](https://github.com/facebookresearch/map-anything) feed-forward transformer.
 
