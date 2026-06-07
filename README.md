@@ -1,4 +1,4 @@
-# Mapillary × MapAnything × VGGT-Long × Pi3 — Street-Level 3D Reconstruction Pipeline
+# Mapillary × MapAnything × VGGT-Long × Pi-Long — Street-Level 3D Reconstruction Pipeline
 
 A research pipeline for metric 3D reconstruction, trajectory evaluation, and Gaussian Splatting from Mapillary street-level imagery. Compares feed-forward transformer backbones on sequential drive datasets — no per-scene SfM required. All runs tracked via MLflow on DagsHub.
 
