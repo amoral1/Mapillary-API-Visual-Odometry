@@ -34,9 +34,6 @@ Mapillary API  ──►  Backbone Inference  ──►  COLMAP Export  ──�
 ## Experiment Tracking
 
 All runs logged to **DagsHub MLflow**:
-- Repo: `anaismorales/vggt-long`
-- Experiment: `vggt-long-dense-subset`
-- Auth: `DAGSHUB_USER_TOKEN` env var
 
 Tracked params: `backbone`, `chunk_size`, `CONF_THRESHOLD`, `SAMPLE_RATIO`, `sequence_type`, `frame_count`, `stride`
 Tracked metrics: `RPE_mean_m`, `scale_GPS_vision`, `DTW_normalised`, `pts_per_frame`, `ATE`
