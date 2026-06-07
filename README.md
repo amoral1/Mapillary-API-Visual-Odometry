@@ -1,26 +1,60 @@
-# Mapillary × MapAnything x Vggt-Long x Pi-Long — Street-Level 3D Reconstruction Pipeline
+# Mapillary × MapAnything × VGGT-Long × Pi3 — Street-Level 3D Reconstruction Pipeline
 
-A research pipeline for metric 3D reconstruction, trajectory evaluation, and Gaussian Splatting from Mapillary street-level imagery, built on Meta's [MapAnything](https://github.com/facebookresearch/map-anything) feed-forward transformer.
+A research pipeline for metric 3D reconstruction, trajectory evaluation, and Gaussian Splatting from Mapillary street-level imagery. Compares feed-forward transformer backbones on sequential drive datasets — no per-scene SfM required. All runs tracked via MLflow on DagsHub.
 
-> Study area: two street-level driving sequences through **Tokyo, Japan** — ~870 raw Mapillary frames each, sampled at stride 5 down to ~174 inference frames per sequence.
+> Study area: street-level driving sequences through **Tokyo, Japan** — ~870 raw Mapillary frames per sequence, sampled at stride 5 down to ~174 inference frames, or stride 1 down to 100-frame dense subsets.
 
 ---
 
 ## Pipeline Overview
 
 ```
-Mapillary API  ──►  MapAnything Inference  ──►  Point Cloud / Splat / COLMAP
-  (GPS poses)        (metric 3D, no SfM)          (visualization + 3DGS)
+Mapillary API  ──►  Backbone Inference  ──►  COLMAP Export  ──►  Nerfstudio Splatfacto
+  (GPS poses)       (MapAnything /             (cameras.txt        (trained 3DGS,
+                     VGGT-Long / Pi3)           images.txt          30k steps,
+                     metric 3D, no SfM)         points3D.txt)       ~123 MB PLY)
+                          │
+                          └──►  Trajectory Metrics (ATE / RPE / DTW)
+                                MLflow → DagsHub
 ```
 
-The pipeline has two branches:
+---
 
-| Branch | Notebooks | Runs on |
+## Models Compared
+
+| Backbone | Inference style | Chunk strategy | Notes |
+|---|---|---|---|
+| **MapAnything** | Feed-forward transformer | 3 splits, 5-frame overlap | Meta Apache 2.0. Strong baseline. |
+| **VGGT-Long** | Feed-forward, chunked SIM3 alignment | Configurable chunk_size + overlap | Loop closure via SALAD. RPE_mean=2.46m on seq_B. |
+| **Pi3** | Feed-forward | Single chunk preferred | HuggingFace `yyfz233/Pi3`. CONF_THRESHOLD=0.05 (conf maxes ~0.5). |
+| **Pi-Long** | TBD | TBD | Planned. |
+
+---
+
+## Experiment Tracking
+
+All runs logged to **DagsHub MLflow**:
+- Repo: `anaismorales/vggt-long`
+- Experiment: `vggt-long-dense-subset`
+- Auth: `DAGSHUB_USER_TOKEN` env var
+
+Tracked params: `backbone`, `chunk_size`, `CONF_THRESHOLD`, `SAMPLE_RATIO`, `sequence_type`, `frame_count`, `stride`
+Tracked metrics: `RPE_mean_m`, `scale_GPS_vision`, `DTW_normalised`, `pts_per_frame`, `ATE`
+
+---
+
+## Notebooks
+
+| Notebook | Backbone | Purpose |
 |---|---|---|
-| **Trajectory evaluation** | `mapanything-pipeline`, `mapanything-pipeline-v2` | Local / Jupyter |
-| **3D reconstruction + Gaussian Splatting** | `mapanything_pipeline-splatv1`, `mapanything_pipeline-splatv2` | Google Colab A100 |
+| `mapanything-pipeline` | MapAnything | Base pipeline — API fetch, haversine metrics, inference, Plotly 3D |
+| `mapanything-pipeline-v2` | MapAnything | Adds PLY builder, COLMAP export |
+| `mapanything_pipeline-splatv1` | MapAnything | First splat run (naive export, stride=2) |
+| `mapanything_pipeline-splatv2` | MapAnything | Improved splat — kNN scale, conf-weighted opacity, COLMAP |
+| `vggt_long_pipeline-2` | VGGT-Long | Full 174-frame sequence, 3 chunks, loop closure |
+| `vggt_long_dense_subset` | VGGT-Long / Pi3 | Dense subset [0:100:1], checkpoint save/load, MLflow, COLMAP → splatfacto |
 
-> Notebooks are not included in this repo due to size. See [Notebooks](#notebooks) for descriptions and access.
+> Notebooks maintained separately. See [Notebooks](#notebooks) for access.
 
 ---
 
@@ -47,173 +81,184 @@ The pipeline has two branches:
 
 ---
 
-### Gaussian Splat — Naive (splatv1)
-*First splat export: fixed scale=0.05, opacity=200, no confidence filtering. ~200k Gaussians, ~6 MB.*
-
-![Naive splat](assets/splat_naive.png)
-
----
-
-### Gaussian Splat — Improved (splatv2)
-*Improved export: kNN-adaptive scale, confidence-weighted opacity [120–255], 4M Gaussians subsampled consistently. ~128 MB. Viewed in [antimatter15.com/splat](https://antimatter15.com/splat/).*
+### Gaussian Splat — MapAnything Improved (splatv2)
+*kNN-adaptive scale, confidence-weighted opacity [120–255], 4M Gaussians subsampled consistently. ~128 MB.*
 
 ![Improved splat](assets/splat_improved.png)
 
 ---
 
+### Gaussian Splat — Nerfstudio Splatfacto (VGGT-Long / Pi3)
+*Trained 3DGS via nerfstudio splatfacto (30k steps) initialized from VGGT-Long/Pi3 COLMAP export. ~123 MB. Forward-facing sequences produce spike artifacts — loop sequences planned.*
+
+---
+
 ## Architecture
 
+### MapAnything Branch
 ```
-Mapillary API
-    │  image IDs + GPS poses (geometry / computed_geometry)
-    │  stride=5 download → ~174 JPEGs cached to Drive
-    ▼
-MapAnything  (facebook/map-anything-apache)
-    │  feed-forward transformer — no per-scene optimization, no COLMAP
-    │  3-split inference (~60 frames/split, 5-frame overlap)
-    │  memory_efficient_inference=False — full attention per split
-    │
-    │  Per-frame outputs used:
-    │    pts3d          (H×W×3)  3D points, world coords
-    │    img_no_norm    (H×W×3)  preprocessed image, pixel-aligned with pts3d
-    │    conf           (H×W)    per-pixel confidence
-    │    mask           (H×W×1)  validity mask
-    │    camera_poses   (4×4)    cam-to-world transform
-    │    intrinsics     (3×3)    recovered pinhole K
+Mapillary API → MapAnything (3-split, ~60 frames/split, 5-frame overlap)
+    │  pts3d (H×W×3), img_no_norm (H×W×3), conf (H×W), camera_poses (4×4), intrinsics (3×3)
     ▼
 extract_reconstruction()
-    │  confidence-masked pts + colors + normalized conf per frame
-    │  returns: (pts, cols, confs, cam_poses, cam_K)
-    ▼
-    ├── Plotly 3D scatter      30k subsample, 3σ clip, dark theme
-    ├── Colored PLY            Open3D visualization
+    ├── Plotly 3D scatter      30k subsample, 3σ clip
+    ├── Colored PLY            Open3D
     ├── Improved .splat        4M Gaussians → antimatter15.com/splat
     └── COLMAP export          cameras.txt / images.txt / points3D.txt
-                               → gaussian-splatting trainer
+```
+
+### VGGT-Long / Pi3 Branch
+```
+Mapillary API → Subset [0:100:1] → VGGTLongTracked (chunk_records saved to .npy)
+    │  world_points (T,H,W,3), world_points_conf (T,H,W), extrinsic (T,4,4), intrinsic (T,3,3)
+    ▼
+aggregate_world_points()  →  Plotly 3D / PLY
+    ▼
+COLMAP export (Cell A)    →  cameras.txt / images.txt / points3D.txt
+    ▼
+Nerfstudio splatfacto     →  30k steps, trained .ply → Drive
+    ▼
+MLflow logging            →  DagsHub
 ```
 
 ---
 
 ## Trajectory Metrics
 
-Haversine-derived metrics comparing GPS ground truth against MapAnything-recovered poses across each sequence.
-
 | Metric | Description |
 |---|---|
 | **ATE** (Absolute Trajectory Error) | Mean positional deviation over the full sequence |
 | **RPE** (Relative Pose Error) | Mean frame-to-frame delta error |
-| **Total distance** | Haversine sum over GPS waypoints |
+| **scale_GPS_vision** | Ratio of GPS-derived scale to model-derived scale |
+| **DTW_normalised** | Dynamic Time Warping distance between predicted and GPS trajectory |
 
 ---
 
 ## Splat Comparison
 
-| | Naive (splatv1) | Improved (splatv2) |
-|---|---|---|
-| **Inference stride** | 2 (every other frame) | 1 (all ~174 frames) |
-| **Inference mode** | Single call, `minibatch=12` | 3-split, `minibatch=6` |
-| **Scale** | Fixed `0.05` | kNN mean distance to 4 neighbors |
-| **Opacity** | Fixed `200` | `conf → [120, 255]` |
-| **Gaussians** | ~200k | 4M (subsampled from ~32.5M) |
-| **File size** | ~6 MB | ~128 MB |
+| | MapAnything splatv1 | MapAnything splatv2 | VGGT-Long / Pi3 splatfacto |
+|---|---|---|---|
+| **Stride** | 2 | 1 (~174 frames) | 1 (100-frame subset) |
+| **Scale** | Fixed 0.05 | kNN mean dist (4 neighbors) | Trained (nerfstudio) |
+| **Opacity** | Fixed 200 | conf → [120, 255] | Trained |
+| **Gaussians** | ~200k | 4M | Densified from seed pts |
+| **File size** | ~6 MB | ~128 MB | ~123 MB |
+| **Method** | Direct export | Direct export | Trained 3DGS (30k steps) |
 
 ---
 
 ## COLMAP Export
 
-Output structure for downstream 3DGS training:
+Standard output structure for downstream splatfacto / 3DGS training:
 
 ```
-seq_B_colmap/
-├── images/              # ~174 JPEGs renamed 00001.jpg … 000174.jpg
-└── sparse/0/
-    ├── cameras.txt      # 1 PINHOLE camera, model-recovered fx fy cx cy
-    ├── images.txt       # QW QX QY QZ TX TY TZ per frame (scipy Rotation)
-    └── points3D.txt     # intentionally empty
+gsplat/
+├── colmap_sparse/0/
+│   ├── cameras.txt      # PINHOLE — intrinsics scaled to actual image res
+│   ├── images.txt       # QW QX QY QZ TX TY TZ per frame
+│   └── points3D.txt     # seed points from world_points (conf-filtered)
+└── splatfacto.ply       # trained output
 ```
 
-Train with:
+Train with nerfstudio:
 ```bash
-git clone https://github.com/graphdeco-inria/gaussian-splatting
-pip install -r requirements.txt
-python train.py -s /path/to/seq_B_colmap --iterations 7000
+ns-train splatfacto \
+  --data /path/to/gsplat_scene \
+  --output-dir /content/ns_output \
+  --max-num-iterations 30000 \
+  --pipeline.model.sh-degree 0 \
+  colmap --colmap-path sparse/0 --images-path images
 ```
 
 ---
 
 ## Key Implementation Notes
 
-**Stride math**
-The `stride` parameter in `SEGMENT_IDS[::stride]` applies to the ~174 *already-downloaded* IDs, not the 870 raw API frames. Stride=1 in the splat notebooks uses all available cached images.
+**Run order (fresh Colab session)**
+`§3 TF CPU-only → §1 Install → §2 Clone+Weights → §4 Drive mount → rest`
+TF must be CPU-only before any import happens.
 
-**OOM on A100 (80 GB)**
-MapAnything with `memory_efficient_inference=False` runs full O(N²) attention — 174 frames at once exceeds VRAM. The 3-split approach (~60 frames per split with 5-frame overlap) keeps each chunk within budget.
+**Pi3 confidence scale**
+Pi3 conf maxes at ~0.5, not ~5 like VGGT-Long. Set `CONF_THRESHOLD=0.05` for Pi3 runs.
+
+**Pi3 chunk size**
+Must override via `cfg.Data.chunk_size` immediately before `pipeline.run()` — Pi3 defaults override notebook variables.
+
+**COLMAP camera resolution**
+`cameras.txt` must use actual image dimensions (e.g. 518×392), not the model's internal output resolution (e.g. 574×434 for Pi3). Scale intrinsics: `fx_scaled = fx_model * (W_img / W_model)`.
+
+**PyTorch 2.6 + nerfstudio**
+Nerfstudio checkpoint loading breaks with PyTorch 2.6. Patch `eval_utils.py`:
+```python
+torch.load(load_path, map_location="cpu", weights_only=False)
+```
+
+**Drive FUSE — no symlinks**
+Use `shutil.copy2` fallback. Subset images must be in `/content/` local storage, not Drive.
+
+**OOM on A100 (MapAnything)**
+174 frames at once exceeds VRAM with `memory_efficient_inference=False`. Use 3-split approach (~60 frames/split, 5-frame overlap).
+
+**Forward-facing sequence limitation**
+All sequences currently are forward-facing drives. Splatfacto produces spike artifacts due to poor lateral baseline and no loop closure. Next: Mapillary API search for loop sequences (start/end within ~50m).
+
+**eval() string bug (VGGT-Long)**
+OmegaConf parses float config values; VGGT-Long calls `eval()` on them. Fix:
+```python
+cfg.Model.IRLS.tol = str(IRLS_TOL)
+cfg.Loop.SIM3_Optimizer.lambda_init = str(1e-6)
+```
 
 **NumPy 2.0 compatibility**
-`ndarray.ptp()` was removed in NumPy 2.0. All uses replaced with `.max() - .min() + 1e-8`.
-
-**Array consistency**
-`pts`, `cols`, and `confs` must be subsampled with the same index array `idx` before export. Subsampling any one array separately causes shape mismatch errors inside `export_improved_splat`.
-
-**Browser Gaussian limit**
-3–5M Gaussians (~96–160 MB) is the practical limit for `antimatter15.com/splat`. The unsubsampled 32.5M export (992 MB) causes a `TypeError: Load Failed` in browser.
-
----
-
-## Notebooks
-
-Notebooks are maintained separately and shared on request. Four notebooks in total:
-
-| Notebook | Purpose |
-|---|---|
-| `mapanything-pipeline` | Base pipeline — API fetch, haversine metrics, MapAnything inference, Plotly 3D |
-| `mapanything-pipeline-v2` | Adds Section 9: colored PLY builder, COLMAP export |
-| `mapanything_pipeline-splatv1` | First Colab splat run (naive export, stride=2) |
-| `mapanything_pipeline-splatv2` | Capstone — all fixes, improved splat, cloudflared viewer, COLMAP |
-
----
-
-## Setup
-
-### Local (pipeline notebooks)
-```bash
-pip install requests pandas numpy plotly open3d scipy geopy
-```
-A Mapillary API token is required — set `MLY_TOKEN` in the notebook config cell.
-
-### Google Colab A100 (splat notebooks)
-```python
-pip install "mapanything[all] @ git+https://github.com/facebookresearch/map-anything.git@main"
-
-from google.colab import drive
-drive.mount('/content/drive')
-```
-
-Sequence images are expected at:
-```
-MyDrive/Mapillary_HERE_Init_Sequences/
-├── seq_A_<id>/    # ~174 JPEGs
-└── seq_B_<id>/    # ~174 JPEGs
-```
+`ndarray.ptp()` removed. Replace with `.max() - .min() + 1e-8`.
 
 ---
 
 ## Roadmap
 
-- [ ] Swap percentile confidence threshold for `non_ambiguous_mask` (cleaner sky/reflection removal)
-- [ ] Apply `metric_scaling_factor` per split to remove inter-split seam offsets
-- [ ] Feed COLMAP output into full 3DGS trainer (Kerbl et al. 2023)
-- [ ] MLflow experiment tracking for model comparison (MapAnything vs VGGT)
+- [ ] Find Mapillary loop sequence (start/end within ~50m, Tokyo)
+- [ ] Run splatfacto on VGGT-Long checkpoint (convert camera_poses.txt → COLMAP)
+- [ ] Run MapAnything dense subset (stride=1, 100 frames) for fair three-way comparison
+- [ ] MLflow sweep: CONF_THRESHOLD, chunk_size, backbone across same sequence
+- [ ] Pi-Long backbone integration
+- [ ] Investigate cold-start drift (first chunk, no prior context)
+- [ ] YOLO-seg semantic filtering at loop closure / cold-start frames
+
+---
+
+## Setup
+
+### Local (trajectory evaluation notebooks)
+```bash
+pip install requests pandas numpy plotly open3d scipy geopy
+```
+
+### Google Colab (reconstruction + splat notebooks)
+```python
+pip install nerfstudio plyfile ultralytics mlflow dagshub piexif tyro
+```
+
+Sequence images expected at:
+```
+MyDrive/Mapillary_HERE_Init_Sequences/
+├── seq_A_<id>/images/    # ~174 JPEGs
+└── seq_B_<id>/images/    # ~174 JPEGs
+```
+
+A Mapillary API token is required — set `MLY_TOKEN`. DagsHub token — set `DAGSHUB_USER_TOKEN`.
 
 ---
 
 ## References
 
 - [MapAnything — Meta Research](https://github.com/facebookresearch/map-anything)
+- [VGGT-Long](https://github.com/HengyiWang/VGGT-Long)
+- [Pi3 — yyfz233/Pi3](https://huggingface.co/yyfz233/Pi3)
+- [VGGT-Long-Gsplat](https://github.com/msilaev/VGGT-Long-Gsplat)
+- [Nerfstudio splatfacto](https://docs.nerf.studio)
 - [Mapillary API v4](https://www.mapillary.com/developer/api-documentation)
 - [3D Gaussian Splatting (Kerbl et al.)](https://github.com/graphdeco-inria/gaussian-splatting)
 - [antimatter15 splat viewer](https://antimatter15.com/splat/)
-- [cloudflared tunnels](https://github.com/cloudflare/cloudflared)
 
 ---
 
